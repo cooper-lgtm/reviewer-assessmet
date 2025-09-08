@@ -122,4 +122,5 @@ Agent需要分析程式碼，並輸出一份JSON報告。這份報告需要清�
 ## 評測用的示例資料
 
 在開發和測試過程中，可以使用我們提供的示例專案（example1），也可以自行使用github上的專案進行測試。
+示例專案中的`example1/examination.md`内容是完整的`problem_description`。
 
