@@ -1,126 +1,79 @@
-# 高階後端工程師（AI方向）- 程式設計評測
+# AI Reviewer Agent
 
-你好！
+一个接收功能描述与代码压缩包，输出代码功能定位报告的 FastAPI 服务。支持上传 `problem_description` 与 `code_zip` (zip 文件)，返回包含功能实现位置的 JSON，可选生成并执行动态测试（占位中）。
 
-感謝你參與本次招聘流程。本次評測旨在考察你在AI應用開發領域的綜合能力，特別是利用大型語言模型（LLM）解決實際問題的工程、設計和創造能力。請仔細閱讀以下說明。
+## 功能特性
+- POST `/analyze`：multipart/form-data，字段 `problem_description`(string) + `code_zip`(file, zip)。
+- 静态分析：解压、扫描文本文件，按需求拆分与关键词检索生成 `feature_analysis`。
+- 报告输出：标准 JSON，含 `feature_analysis` 与 `execution_plan_suggestion`，预留 `functional_verification`。
+- 可选 LLM：预置 OpenRouter 客户端，支持配置模型/Key，尚未在分析流程中启用（需后续接入）。
+- 日志：基础请求日志，异常记录。
 
----
+## 运行要求
+- Python 3.11+
+- 依赖见 `requirements.txt`
+- 可选：OpenRouter API Key（若要启用真实 LLM 调用）
 
-## 場景描述
+## 本地快速开始
+```bash
+python3 -m venv venv && source venv/bin/activate
+python3 -m pip install -r requirements.txt
+# 启动服务
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+# 健康检查
+curl http://127.0.0.1:8000/health
+```
 
-你的任務是構建一個AI Agent。這個Agent能夠接收程式碼和需求，然後對程式碼進行分析，並輸出一份結構化的分析報告。Agent可以使用NodeJs/Python/N8N開發。
+## 环境变量
+- `OPENROUTER_API_KEY`：OpenRouter 密钥（不要提交到代码库）
+- `OPENROUTER_MODEL`：模型名，默认 `x-ai/grok-4.1-fast:free`
+- `OPENROUTER_ENDPOINT`：可选，默认 `https://openrouter.ai/api/v1/chat/completions`
+- `ENABLE_TEST_RUN`：`true/false`，控制是否执行生成的测试（默认 false，占位实现）
 
-## Agent的輸入
+## 接口示例
+```bash
+# 准备代码压缩包
+zip -r /tmp/project.zip example1
 
-你的Agent需要設計成一個接受 `multipart/form-data` 請求的API服務。該服務接收以下兩個部分：
+curl -X POST http://127.0.0.1:8000/analyze \
+  -F "problem_description=$(cat example1/examination.md)" \
+  -F "code_zip=@/tmp/project.zip"
+```
 
-1.  **`problem_description`** (string, form field): 一段描述專案應實現功能的自然語言文字。
-2.  **`code_zip`** (file, form upload): 一個包含專案完整原始碼的zip壓縮檔案。
-
-## 核心任務 (必須完成)
-
-**目標：生成一份程式碼功能定位報告。**
-
-Agent需要分析程式碼，並輸出一份JSON報告。這份報告需要清晰地指出，為了實現`problem_description`中描述的各項功能，程式碼倉庫中的哪些部分是關鍵的實現點。
-
-**JSON報告結構示例：**
-
+响应示例（占位）：
 ```json
 {
   "feature_analysis": [
-    {
-      "feature_description": "實現`建立頻道`功能",
-      "implementation_location": [
-        {
-          "file": "src/modules/channel/channel.resolver.ts",
-          "function": "createChannel",
-          "lines": "13-16"
-        },
-        {
-          "file": "src/modules/channel/channel.service.ts",
-          "function": "create",
-          "lines": "21-24"
-        }
-      ]
-    },
-    {
-      "feature_description": "實現`在頻道中傳送訊息`功能",
-      "implementation_location": [
-        {
-          "file": "src/modules/message/message.resolver.ts",
-          "function": "createMessage",
-          "lines": "13-16"
-        },
-        {
-          "file": "src/modules/message/message.service.ts",
-          "function": "create",
-          "lines": "23-34"
-        }
-      ]
-    },
-    {
-      "feature_description": "實現`按時間倒序列出頻道中的訊息`功能",
-      "implementation_location": [
-        {
-          "file": "src/modules/message/message.resolver.ts",
-          "function": "findAll",
-          "lines": "18-21"
-        },
-        {
-          "file": "src/modules/message/message.service.ts",
-          "function": "findAll",
-          "lines": "41-66"
-        }
-      ]
-    }
+    {"feature_description": "...", "implementation_location": []}
   ],
-  "execution_plan_suggestion": "要執行此專案，應首先執行 `npm install` 安裝依賴，然後執行 `npm run start:dev` 來啟動服務。該服務是一個GraphQL API，可以在 http://localhost:3000/graphql 訪問。"
+  "execution_plan_suggestion": "请参考项目启动说明"
 }
 ```
 
-## 加分項 (可選)
+## Docker 运行
+```bash
+docker build -t ai-reviewer .
+docker run -p 8000:8000 \
+  -e OPENROUTER_API_KEY=你的key \
+  -e OPENROUTER_MODEL=x-ai/grok-4.1-fast:free \
+  ai-reviewer
+```
+如需使用 env 文件：`docker run --env-file .env -p 8000:8000 ai-reviewer`。
 
-**目標：動態驗證功能的正確性。**
-
-在完成核心任務的基礎上，如果你能讓Agent更進一步，**自動驗證**是否能正確工作，並給出**可執行的單元測試**，你將獲得極大的加分。
-
-這通常意味著你的Agent需要具備動態生成和執行測試程式碼的能力。
-
-**包含加分項的JSON報告結構示例：**
-
-```json
-{
-  "feature_analysis": {
-    "...": "..."
-  },
-  "functional_verification": {
-    "generated_test_code": "const request = require('supertest');\nconst assert = require('assert');\n\ndescribe('GraphQL API', () => {\n  it('should create a channel and then a message in it', async () => {\n    const server = 'http://localhost:3000';\n    const createChannelQuery = `mutation { createChannel(createChannelInput: { name: \"New Channel\" }) { id, name } }`;\n    const channelRes = await request(server).post('/graphql').send({ query: createChannelQuery });\n    const channelId = channelRes.body.data.createChannel.id;\n\n    const createMessageQuery = `mutation { createMessage(createMessageInput: { channelId: ${channelId}, title: \"Hello\", content: \"World\" }) { id, title } }`;\n    const messageRes = await request(server).post('/graphql').send({ query: createMessageQuery });\n\n    assert.equal(messageRes.body.data.createMessage.title, 'Hello');\n  });\n});",
-    "execution_result": {
-      "tests_passed": true,
-      "log": "1 passing (2s)"
-    }
-  }
-}
+## 测试
+```bash
+pytest -q
 ```
 
-## 交付要求
-
-1.  **Agent原始碼**: 提供你的Agent的完整原始碼的GitHub倉庫地址。請確保程式碼結構清晰，並包含必要的說明文件。
-2.  **可執行環境**: 提供一種標準化的方式來執行你的Agent。請在以下兩種方式中**任選其一**：
-    *   **選項A (推薦):** 在原始碼倉庫中包含一個 `Dockerfile` 及相關說明，使我們能夠透過 `docker build` 和 `docker run` 快速啟動你的Agent服務。
-    *   **選項B:** 如果你使用n8n等工作流工具，請提供可直接匯入的工作流檔案（`.json`格式）及必要的配置說明。
-
-## 評判標準
-
-我們將從以下幾個維度綜合評估你的成果：
-
-*   **任務完成度**: 是否完整、準確地實現了核心任務的要求。
-*   **加分項實現**: 是否挑戰並實現了加分項，以及實現的質量。
-*   **程式碼質量**: 你的Agent原始碼是否結構清晰、易於理解和維護。
-*   **設計思路**: 你在Agent設計中（如Prompt Engineering、工作流設計、錯誤處理等）體現的思考深度。
-
-## 評測用的示例資料
-
-在開發和測試過程中，可以使用我們提供的示例專案（example1），也可以自行使用github上的專案進行測試。
-示例專案中的`example1/examination.md`内容是完整的`problem_description`。
+## 目录结构
+```
+app/
+  main.py            # FastAPI 入口，日志中间件、路由挂载
+  routers/analyze.py # /analyze 路由，校验并调用 Analyzer
+  services/          # retrieval/analyzer/report/testgen 等核心逻辑
+  llm/               # OpenRouter LLM 客户端占位
+example1/            # 示例需求说明
+Dockerfile
+requirements.txt
+```
 
