@@ -19,9 +19,8 @@ class Analyzer:
     def __init__(self, llm_client: Optional[LLMClient] = None, retrieval: Optional[RetrievalService] = None):
         self.llm = llm_client or LLMClient()
         self.retrieval = retrieval or RetrievalService()
-        # 通过环境变量控制是否启用动态验证（加分项）
-        self.enable_verification = os.getenv("ENABLE_TEST_RUN", "false").lower() == "true"
-        self.testgen = TestGenerator(enable_run=self.enable_verification)
+        # 动态验证始终启用（生成并尝试执行测试）
+        self.testgen = TestGenerator()
 
     async def run(self, problem_description: str, zip_path: Path) -> Dict:
         """
@@ -53,9 +52,15 @@ class Analyzer:
                 "execution_plan_suggestion": execution_plan,
             }
 
-            # 若启用验证，生成动态测试并执行
-            if self.enable_verification:
-                result["functional_verification"] = self.testgen.generate(root, result)
+            # 生成并尝试执行动态测试（加分项）
+            try:
+                result["functional_verification"] = await self.testgen.generate_and_run(root, result)
+            except Exception:
+                # 出错时不影响主流程
+                result["functional_verification"] = {
+                    "generated_test_code": "// generation failed",
+                    "execution_result": {"tests_passed": False, "log": "test generation/execution failed"},
+                }
 
             return result
 
@@ -67,13 +72,21 @@ class Analyzer:
             messages = [
                 {
                     "role": "system",
-                    "content": "你是需求拆分助手，将需求文本拆分为功能点，覆盖主要功能，避免过度细分，输出 JSON 数组字符串。",
+                    "content": """
+                    你是需求拆分助手。阅读 problem_description，只提取明确要求实现的功能点，按出现顺序输出 JSON 数组字符串。
+- 只保留业务功能，忽略背景、可选建议、技术栈或工程化描述。
+- 如果出现显式的功能列表（如 “The API should have these features”），以该列表为准。
+- 不臆造功能，不扩展、不解释。
+仅返回 JSON 数组字符串。
+""",
                 },
                 {"role": "user", "content": description},
             ]
             data = await self.llm.chat(messages, enable_reasoning=False)
             content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
             features = json.loads(content) if content else []
+            logger = logging.getLogger("ai_agent.analyze")
+            logger.info("features: %s", features)
             if isinstance(features, list) and features:
                 return [str(f).strip() for f in features if str(f).strip()]
         except Exception:
