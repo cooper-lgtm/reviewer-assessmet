@@ -4,6 +4,7 @@
 import json
 import os
 import tempfile
+import logging
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -160,12 +161,18 @@ class Analyzer:
     async def _suggest_execution_plan(self, root: Path) -> str:
         """根据探测到的文件给出启动建议，优先尝试 LLM 总结，失败回退规则。"""
         hint = self._collect_project_hint(root)
+        logger = logging.getLogger("ai_agent.analyze")
+        logger.info("execution plan hint collected: %s", "yes" if hint else "no")
+
         # 尝试 LLM 生成一句话启动说明
         if hint:
             messages = [
                 {
                     "role": "system",
-                    "content": "你是项目启动助手，根据提供的项目信息生成一句简洁的启动建议（包含安装依赖、启动命令、可能的端口/接口），简体中文。",
+                    "content": (
+                        "You are a start-up helper. Return one concise plain-text sentence with install/start commands "
+                        "and API endpoints/ports if known. No markdown, no code fences, no bullet lists."
+                    ),
                 },
                 {"role": "user", "content": hint},
             ]
@@ -174,10 +181,11 @@ class Analyzer:
                 if isinstance(data, dict):
                     content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
                     if content:
-                        return content.strip()
+                        cleaned = content.replace("```", "").replace("**", "").strip()
+                        cleaned = " ".join(cleaned.split())
+                        return cleaned
             except Exception:
-                # LLM 不可用则回退
-                pass
+                logger.warning("execution plan LLM failed, fallback to rules", exc_info=True)
 
         # 规则回退
         if (root / "package.json").exists():
@@ -198,26 +206,45 @@ class Analyzer:
         return "请参考项目说明启动服务"
 
     def _collect_project_hint(self, root: Path) -> str:
-        """收集 package.json、README、schema 等线索，供 LLM 生成启动建议。"""
+        """收集 package.json、README、schema 等线索，支持单子目录包裹和递归查找。"""
         hints = []
-        pkg_path = root / "package.json"
+        project_root = self._detect_project_root(root)
+
+        pkg_path = project_root / "package.json"
         if pkg_path.exists():
             try:
                 pkg_text = pkg_path.read_text(encoding="utf-8")
                 hints.append(f"package.json 内容: {pkg_text[:2000]}")
             except Exception:
                 pass
-        readme_path = root / "README.md"
+        readme_path = project_root / "README.md"
         if readme_path.exists():
             try:
                 readme_text = readme_path.read_text(encoding="utf-8")
                 hints.append(f"README 节选: {readme_text[:2000]}")
             except Exception:
                 pass
-        if (root / "schema.gql").exists() or (root / "schema.graphql").exists():
+        if (project_root / "schema.gql").exists() or (project_root / "schema.graphql").exists():
             hints.append("检测到 GraphQL schema，可能是 GraphQL API，常见端点 /graphql，端口多为 3000/4000")
-        if (root / "docker-compose.yml").exists():
+        if (project_root / "docker-compose.yml").exists():
             hints.append("存在 docker-compose.yml，可用 docker compose up 启动")
-        if (root / "Dockerfile").exists():
+        if (project_root / "Dockerfile").exists():
             hints.append("存在 Dockerfile，可用 docker build / docker run 启动")
         return "\n".join(hints)
+
+    def _detect_project_root(self, root: Path) -> Path:
+        """处理解压后只有单子目录的情况，或递归查找首个 package/README/docker 文件。"""
+        # 如果根下有 package.json 等，直接用根
+        direct_hits = ["package.json", "README.md", "docker-compose.yml", "Dockerfile"]
+        if any((root / f).exists() for f in direct_hits):
+            return root
+        # 若根下只有一个子目录，则深入
+        children = [p for p in root.iterdir() if p.is_dir()]
+        if len(children) == 1:
+            sub = children[0]
+            if any((sub / f).exists() for f in direct_hits):
+                return sub
+        # 递归查找首个命中的 package.json，找不到则返回根
+        for path in root.rglob("package.json"):
+            return path.parent
+        return root
