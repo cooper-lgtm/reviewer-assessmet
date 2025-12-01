@@ -50,6 +50,7 @@ class RetrievalService:
             re.compile(r"^(export\s+)?(async\s+)?function\s+(\w+)"),
             re.compile(r"^(export\s+)?(const|let|var)\s+(\w+)\s*=\s*(async\s+)?\("),
             re.compile(r"^(export\s+)?class\s+(\w+)"),
+            re.compile(r"^(public\s+|private\s+|protected\s+)?(async\s+)?(\w+)\s*\("),
             re.compile(r"^@Resolver\b.*"),
             re.compile(r"^@Controller\b.*"),
             re.compile(r"^@Query\b.*"),
@@ -108,26 +109,65 @@ class RetrievalService:
     def search_features(self, features: Iterable[str], files: Dict[str, List[str]], max_hits: int = 3) -> Dict[str, List[CodeSnippet]]:
         """根据 feature 关键词在文本中做简单关键字搜索，返回候选片段。"""
         result: Dict[str, List[CodeSnippet]] = {}
+
+        # 路径过滤：排除测试/样例/枚举/拦截器/配置/构建产物等非业务实现
+        excluded_tokens = [
+            "test/",
+            "/test",
+            "__tests__",
+            ".spec.",
+            ".test.",
+            "fixtures",
+            "fixture",
+            "mock",
+            "mocks",
+            "example",
+            "examples",
+            "enum",
+            "interceptor",
+            "filter",
+            "middleware",
+            "docs",
+            "readme",
+            "config",
+            "docker",
+            "dist/",
+            "build/",
+        ]
+        positive_tokens = ["resolver", "controller", "service", "handler", "router", "usecase", "application"]
+
         for feature in features:
             keywords = self._extract_keywords(feature)
-            snippets: List[CodeSnippet] = []
+            snippets: List[tuple[int, CodeSnippet]] = []
+
             for rel_path, lines in files.items():
+                path_lower = rel_path.lower()
+                if any(tok in path_lower for tok in excluded_tokens):
+                    continue
+
                 joined = "\n".join(lines).lower()
                 score = sum(1 for kw in keywords if kw in joined)
                 if score == 0:
                     continue
+
+                # 根据路径类型加权（业务入口优先）
+                if any(tok in path_lower for tok in positive_tokens):
+                    score += 2
+
                 # 找出第一个命中的行号与摘要
-                hit_line = self._first_hit_line(lines, keywords)
+                hit_line = self._best_hit_line(lines, keywords)
                 summary = lines[hit_line - 1].strip() if hit_line else lines[0].strip()
-                # 取命中行上下文，便于 LLM 判别
+
+                # 取命中行上下文，便于 LLM 判别（扩展上下文以覆盖方法体）
                 if hit_line:
-                    start = max(1, hit_line - 1)
-                    end = min(len(lines), hit_line + 1)
+                    start = max(1, hit_line - 3)
+                    end = min(len(lines), hit_line + 3)
                     context = "\n".join(lines[start - 1:end])
                     line_range = f"{start}-{end}"
                 else:
-                    context = "\n".join(lines[:3])
-                    line_range = "1-1"
+                    context = "\n".join(lines[:8])
+                    line_range = "1-3"
+
                 snippet = CodeSnippet(
                     file=rel_path,
                     lines=line_range,
@@ -135,10 +175,12 @@ class RetrievalService:
                     function=self._nearest_symbol(lines, hit_line) if hit_line else None,
                     context=context,
                 )
-                snippets.append(snippet)
-            # 简单按命中数排序
-            snippets = sorted(snippets, key=lambda s: len(s.summary), reverse=False)[:max_hits]
-            result[feature] = snippets
+                snippets.append((score, snippet))
+
+            # 按评分降序取前 N
+            top_snippets = sorted(snippets, key=lambda s: s[0], reverse=True)[:max_hits]
+            result[feature] = [s[1] for s in top_snippets]
+
         return result
 
     def _extract_keywords(self, text: str) -> List[str]:
@@ -147,12 +189,28 @@ class RetrievalService:
         # 过滤过短词
         return [p for p in parts if len(p) >= 2]
 
-    def _first_hit_line(self, lines: List[str], keywords: List[str]) -> Optional[int]:
+    def _best_hit_line(self, lines: List[str], keywords: List[str]) -> Optional[int]:
+        """优先选出真正包含功能关键词的业务行，避开 import/导出等噪声。"""
+        if not keywords:
+            return None
+
+        best_idx: Optional[int] = None
+        best_score = 0
+
+        def is_noise(line: str) -> bool:
+            stripped = line.strip().lower()
+            return stripped.startswith("import") or stripped.startswith("from") or stripped.startswith("export") or stripped.startswith("//") or stripped.startswith("#")
+
         for idx, line in enumerate(lines, start=1):
+            if is_noise(line):
+                continue
             lower = line.lower()
-            if any(kw in lower for kw in keywords):
-                return idx
-        return None
+            score = sum(1 for kw in keywords if kw in lower)
+            if score > best_score:
+                best_score = score
+                best_idx = idx
+
+        return best_idx
 
     def _nearest_symbol(self, lines: List[str], from_line: int) -> Optional[str]:
         """向上搜索最近的函数/类/装饰器定义。"""

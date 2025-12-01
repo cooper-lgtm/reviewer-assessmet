@@ -113,7 +113,7 @@ class Analyzer:
         candidate_lines = []
         for idx, c in enumerate(candidates, start=1):
             ctx = c.context.replace("\n", " ")
-            ctx = ctx[:400]  # 控制长度
+            ctx = ctx[:800]  # 保留更多方法体上下文
             candidate_lines.append(
                 f"{idx}) file: {c.file} lines: {c.lines} func: {c.function or 'N/A'} ctx: {ctx}"
             )
@@ -130,11 +130,11 @@ class Analyzer:
             {
                 "role": "system",
                 "content": (
-                    "你是代码审查助手，根据给定功能描述在候选列表中挑选最相关的实现位置。"
-                    "优先选择源代码文件中的实现（如 .ts/.js/.py 的 service/resolver/controller 方法），"
-                    "避免选择 schema/测试/文档/配置。"
-                    "返回 JSON：{\"chosen\": [{\"file\":..., \"function\":..., \"lines\":...}]}，"
+                    "你是代码审查助手，只能在候选列表中挑选实现位置。"
+                    "必须优先 controller/resolver/service/handler 中的业务方法；"
+                    "禁止选择测试、枚举、拦截器、过滤器、配置、文档、mock、示例等非业务实现；"
                     "若无匹配，返回 {\"chosen\": []}，不得臆造候选之外的文件。"
+                    "输出 JSON：{\"chosen\": [{\"file\":..., \"function\":..., \"lines\":...}]}"
                 ),
             },
             {"role": "user", "content": user_prompt},
