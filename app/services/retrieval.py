@@ -2,6 +2,7 @@
 文件扫描与检索模块：负责解压 zip、探测语言与快速检索候选片段。
 """
 import io
+import re
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,6 +17,8 @@ class CodeSnippet:
     summary: str
     function: Optional[str] = None
     context: str = ""
+    function: Optional[str] = None
+    context: str = ""
 
 
 class RetrievalService:
@@ -24,6 +27,41 @@ class RetrievalService:
     def __init__(self, max_files: int = 2000, max_file_size: int = 512 * 1024):
         self.max_files = max_files
         self.max_file_size = max_file_size
+        # 常见源代码后缀
+        self.allowed_suffixes = {
+            ".ts",
+            ".tsx",
+            ".js",
+            ".jsx",
+            ".py",
+            ".java",
+            ".go",
+            ".rb",
+            ".php",
+            ".rs",
+            ".cs",
+            ".yaml",
+            ".yml",
+            ".graphql",
+            ".gql",
+        }
+        # 符号提取模式，便于填充 function 名称
+        self.symbol_patterns = [
+            re.compile(r"^(export\s+)?(async\s+)?function\s+(\w+)"),
+            re.compile(r"^(export\s+)?(const|let|var)\s+(\w+)\s*=\s*(async\s+)?\("),
+            re.compile(r"^(export\s+)?class\s+(\w+)"),
+            re.compile(r"^@Resolver\b.*"),
+            re.compile(r"^@Controller\b.*"),
+            re.compile(r"^@Query\b.*"),
+            re.compile(r"^@Mutation\b.*"),
+            re.compile(r"^@Get\b.*"),
+            re.compile(r"^@Post\b.*"),
+            re.compile(r"^@Put\b.*"),
+            re.compile(r"^@Delete\b.*"),
+            re.compile(r"^def\s+(\w+)\("),
+            re.compile(r"^class\s+(\w+)\("),
+            re.compile(r"^func\s+(\w+)\("),
+        ]
 
     def extract_zip(self, zip_path: Path, target_dir: Path) -> None:
         """解压 zip 至指定目录，并做基本安全检查。"""
@@ -47,7 +85,16 @@ class RetrievalService:
         for path in root.rglob("*"):
             if path.is_dir():
                 continue
-            if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".pdf", ".mp4", ".zip"}:
+            suffix = path.suffix.lower()
+            if suffix in {".png", ".jpg", ".jpeg", ".gif", ".pdf", ".mp4", ".zip"}:
+                continue
+            # 跳过常见无关文件
+            name_lower = path.name.lower()
+            if name_lower in {"readme.md", ".gitignore", ".dockerignore"}:
+                continue
+            if any(x in str(path) for x in ["postman-collection", ".spec.", ".test.", "schema.gql"]):
+                continue
+            if suffix and suffix not in self.allowed_suffixes:
                 continue
             try:
                 content = path.read_text(encoding="utf-8")
@@ -85,7 +132,7 @@ class RetrievalService:
                     file=rel_path,
                     lines=line_range,
                     summary=summary,
-                    function=None,
+                    function=self._nearest_symbol(lines, hit_line) if hit_line else None,
                     context=context,
                 )
                 snippets.append(snippet)
@@ -105,4 +152,16 @@ class RetrievalService:
             lower = line.lower()
             if any(kw in lower for kw in keywords):
                 return idx
+        return None
+
+    def _nearest_symbol(self, lines: List[str], from_line: int) -> Optional[str]:
+        """向上搜索最近的函数/类/装饰器定义。"""
+        for idx in range(from_line - 1, 0, -1):
+            line = lines[idx - 1].strip()
+            for pat in self.symbol_patterns:
+                m = pat.match(line)
+                if m:
+                    if m.lastindex:
+                        return m.group(m.lastindex)
+                    return line
         return None

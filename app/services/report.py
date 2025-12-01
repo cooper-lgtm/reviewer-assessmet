@@ -9,7 +9,6 @@ class ImplementationLocation(BaseModel):
     file: str
     function: Optional[str] = None
     lines: str
-    summary: Optional[str] = None
 
 
 class FeatureItem(BaseModel):

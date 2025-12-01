@@ -45,7 +45,7 @@ class Analyzer:
                     }
                 )
 
-            execution_plan = self._suggest_execution_plan(root)
+            execution_plan = await self._suggest_execution_plan(root)
 
             result: Dict[str, object] = {
                 "feature_analysis": feature_analysis,
@@ -101,7 +101,7 @@ class Analyzer:
             ctx = c.context.replace("\n", " ")
             ctx = ctx[:400]  # 控制长度
             candidate_lines.append(
-                f"{idx}) file: {c.file} lines: {c.lines} func: {c.function or 'N/A'} summary: {c.summary} ctx: {ctx}"
+                f"{idx}) file: {c.file} lines: {c.lines} func: {c.function or 'N/A'} ctx: {ctx}"
             )
         user_prompt = "\n".join(
             [
@@ -119,7 +119,7 @@ class Analyzer:
                     "你是代码审查助手，根据给定功能描述在候选列表中挑选最相关的实现位置。"
                     "优先选择源代码文件中的实现（如 .ts/.js/.py 的 service/resolver/controller 方法），"
                     "避免选择 schema/测试/文档/配置。"
-                    "返回 JSON：{\"chosen\": [{\"file\":..., \"function\":..., \"lines\":..., \"summary\":...}]}，"
+                    "返回 JSON：{\"chosen\": [{\"file\":..., \"function\":..., \"lines\":...}]}，"
                     "若无匹配，返回 {\"chosen\": []}，不得臆造候选之外的文件。"
                 ),
             },
@@ -138,7 +138,6 @@ class Analyzer:
                         "file": item.get("file"),
                         "function": item.get("function"),
                         "lines": item.get("lines"),
-                        "summary": item.get("summary"),
                     }
                 )
             if normalized:
@@ -154,15 +153,71 @@ class Analyzer:
                     "file": c.file,
                     "function": c.function,
                     "lines": c.lines,
-                    "summary": c.summary,
                 }
             )
         return fallback
 
-    def _suggest_execution_plan(self, root: Path) -> str:
-        """根据探测到的文件给出启动建议。"""
+    async def _suggest_execution_plan(self, root: Path) -> str:
+        """根据探测到的文件给出启动建议，优先尝试 LLM 总结，失败回退规则。"""
+        hint = self._collect_project_hint(root)
+        # 尝试 LLM 生成一句话启动说明
+        if hint:
+            messages = [
+                {
+                    "role": "system",
+                    "content": "你是项目启动助手，根据提供的项目信息生成一句简洁的启动建议（包含安装依赖、启动命令、可能的端口/接口），简体中文。",
+                },
+                {"role": "user", "content": hint},
+            ]
+            try:
+                data = await self.llm.chat(messages, enable_reasoning=False)
+                if isinstance(data, dict):
+                    content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+                    if content:
+                        return content.strip()
+            except Exception:
+                # LLM 不可用则回退
+                pass
+
+        # 规则回退
         if (root / "package.json").exists():
-            return "npm install && npm run start"
+            pkg_text = (root / "package.json").read_text(encoding="utf-8")
+            if "start:dev" in pkg_text:
+                return "npm install && npm run start:dev"
+            if "start" in pkg_text:
+                return "npm install && npm run start"
+            if "dev" in pkg_text:
+                return "npm install && npm run dev"
+            return "npm install && npm start"
         if (root / "requirements.txt").exists():
             return "pip install -r requirements.txt && uvicorn app.main:app --reload"
+        if (root / "docker-compose.yml").exists():
+            return "docker compose up"
+        if (root / "Dockerfile").exists():
+            return "docker build -t app . && docker run -p 8000:8000 app"
         return "请参考项目说明启动服务"
+
+    def _collect_project_hint(self, root: Path) -> str:
+        """收集 package.json、README、schema 等线索，供 LLM 生成启动建议。"""
+        hints = []
+        pkg_path = root / "package.json"
+        if pkg_path.exists():
+            try:
+                pkg_text = pkg_path.read_text(encoding="utf-8")
+                hints.append(f"package.json 内容: {pkg_text[:2000]}")
+            except Exception:
+                pass
+        readme_path = root / "README.md"
+        if readme_path.exists():
+            try:
+                readme_text = readme_path.read_text(encoding="utf-8")
+                hints.append(f"README 节选: {readme_text[:2000]}")
+            except Exception:
+                pass
+        if (root / "schema.gql").exists() or (root / "schema.graphql").exists():
+            hints.append("检测到 GraphQL schema，可能是 GraphQL API，常见端点 /graphql，端口多为 3000/4000")
+        if (root / "docker-compose.yml").exists():
+            hints.append("存在 docker-compose.yml，可用 docker compose up 启动")
+        if (root / "Dockerfile").exists():
+            hints.append("存在 Dockerfile，可用 docker build / docker run 启动")
+        return "\n".join(hints)
