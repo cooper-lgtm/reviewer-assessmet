@@ -1,6 +1,7 @@
 """
 负责协调需求拆解、文件检索、以及最终的结构化结果组装。
 """
+import json
 import os
 import tempfile
 from pathlib import Path
@@ -23,7 +24,7 @@ class Analyzer:
 
     async def run(self, problem_description: str, zip_path: Path) -> Dict:
         """
-        完整执行流程：解压 → 扫描 → 需求拆解 → 搜索候选 → 组装结果。
+        完整执行流程：解压 → 扫描 → 需求拆解 → 搜索候选 → LLM 甄别 → 组装结果。
         回传字典供 report builder 序列化。
         """
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -31,12 +32,18 @@ class Analyzer:
             self.retrieval.extract_zip(zip_path, root)
             files = self.retrieval.scan_files(root)
 
-            features = self._split_features(problem_description)
-            candidates = self.retrieval.search_features(features, files)
+            features = await self._split_features(problem_description)
+            candidates_map = self.retrieval.search_features(features, files)
 
-            feature_analysis = [
-                self._build_feature_item(feature, candidates.get(feature, [])) for feature in features
-            ]
+            feature_analysis = []
+            for feature in features:
+                chosen_locations = await self._select_with_llm(feature, candidates_map.get(feature, []))
+                feature_analysis.append(
+                    {
+                        "feature_description": feature,
+                        "implementation_location": chosen_locations,
+                    }
+                )
 
             execution_plan = self._suggest_execution_plan(root)
 
@@ -51,26 +58,106 @@ class Analyzer:
 
             return result
 
-    def _split_features(self, description: str) -> List[str]:
-        """粗略拆解需求文本，可替换为 LLM 拆分。"""
+    async def _split_features(self, description: str) -> List[str]:
+        """
+        优先用 LLM 拆解需求；失败或不可用时回退规则拆分。
+        """
+        try:
+            messages = [
+                {
+                    "role": "system",
+                    "content": "你是需求拆分助手，将需求文本拆分为功能点，覆盖主要功能，避免过度细分，输出 JSON 数组字符串。",
+                },
+                {"role": "user", "content": description},
+            ]
+            data = await self.llm.chat(messages, enable_reasoning=False)
+            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            features = json.loads(content) if content else []
+            if isinstance(features, list) and features:
+                return [str(f).strip() for f in features if str(f).strip()]
+        except Exception:
+            pass
+        # 回退：规则拆分
+        return self._split_features_rule(description)
+
+    def _split_features_rule(self, description: str) -> List[str]:
+        """规则拆分：按行；若单行则按句号/分号拆分。"""
         lines = [ln.strip("- *\t") for ln in description.splitlines() if ln.strip()]
         if lines:
             return lines
-        # 如果没有换行，用句号切割
         parts = [p.strip() for p in description.replace("；", ";").replace("。", ".").split(".") if p.strip()]
         return parts or [description]
 
-    def _build_feature_item(self, feature: str, snippets: List[CodeSnippet]) -> Dict:
-        locations = [
+    async def _select_with_llm(self, feature: str, candidates: List[CodeSnippet]) -> List[Dict]:
+        """
+        调用 LLM 在候选中挑选最相关的实现点。
+        若 LLM 不可用或出错，则回退直接返回候选的前几个。
+        """
+        if not candidates:
+            return []
+
+        candidate_lines = []
+        for idx, c in enumerate(candidates, start=1):
+            ctx = c.context.replace("\n", " ")
+            ctx = ctx[:400]  # 控制长度
+            candidate_lines.append(
+                f"{idx}) file: {c.file} lines: {c.lines} func: {c.function or 'N/A'} summary: {c.summary} ctx: {ctx}"
+            )
+        user_prompt = "\n".join(
+            [
+                f"Feature: {feature}",
+                "Candidates:",
+                *candidate_lines,
+                "只允许在候选列表中选择相关实现点；若无匹配返回空。",
+            ]
+        )
+
+        messages = [
             {
-                "file": sn.file,
-                "function": None,
-                "lines": sn.lines,
-                "summary": sn.summary,
-            }
-            for sn in snippets
+                "role": "system",
+                "content": (
+                    "你是代码审查助手，根据给定功能描述在候选列表中挑选最相关的实现位置。"
+                    "优先选择源代码文件中的实现（如 .ts/.js/.py 的 service/resolver/controller 方法），"
+                    "避免选择 schema/测试/文档/配置。"
+                    "返回 JSON：{\"chosen\": [{\"file\":..., \"function\":..., \"lines\":..., \"summary\":...}]}，"
+                    "若无匹配，返回 {\"chosen\": []}，不得臆造候选之外的文件。"
+                ),
+            },
+            {"role": "user", "content": user_prompt},
         ]
-        return {"feature_description": feature, "implementation_location": locations}
+
+        try:
+            data = await self.llm.chat(messages, enable_reasoning=False)
+            content = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            parsed = json.loads(content) if content else {}
+            chosen = parsed.get("chosen", [])
+            normalized: List[Dict] = []
+            for item in chosen:
+                normalized.append(
+                    {
+                        "file": item.get("file"),
+                        "function": item.get("function"),
+                        "lines": item.get("lines"),
+                        "summary": item.get("summary"),
+                    }
+                )
+            if normalized:
+                return normalized
+        except Exception:
+            pass
+
+        # 回退：直接取前 2 个候选
+        fallback: List[Dict] = []
+        for c in candidates[:2]:
+            fallback.append(
+                {
+                    "file": c.file,
+                    "function": c.function,
+                    "lines": c.lines,
+                    "summary": c.summary,
+                }
+            )
+        return fallback
 
     def _suggest_execution_plan(self, root: Path) -> str:
         """根据探测到的文件给出启动建议。"""

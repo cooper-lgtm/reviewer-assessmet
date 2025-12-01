@@ -14,6 +14,8 @@ class CodeSnippet:
     file: str
     lines: str
     summary: str
+    function: Optional[str] = None
+    context: str = ""
 
 
 class RetrievalService:
@@ -70,7 +72,22 @@ class RetrievalService:
                 # 找出第一个命中的行号与摘要
                 hit_line = self._first_hit_line(lines, keywords)
                 summary = lines[hit_line - 1].strip() if hit_line else lines[0].strip()
-                snippet = CodeSnippet(file=rel_path, lines=f"{hit_line}-{hit_line}" if hit_line else "1-1", summary=summary)
+                # 取命中行上下文，便于 LLM 判别
+                if hit_line:
+                    start = max(1, hit_line - 1)
+                    end = min(len(lines), hit_line + 1)
+                    context = "\n".join(lines[start - 1:end])
+                    line_range = f"{start}-{end}"
+                else:
+                    context = "\n".join(lines[:3])
+                    line_range = "1-1"
+                snippet = CodeSnippet(
+                    file=rel_path,
+                    lines=line_range,
+                    summary=summary,
+                    function=None,
+                    context=context,
+                )
                 snippets.append(snippet)
             # 简单按命中数排序
             snippets = sorted(snippets, key=lambda s: len(s.summary), reverse=False)[:max_hits]
